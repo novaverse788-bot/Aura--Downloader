@@ -1,18 +1,20 @@
 {
     "$schema": "https://railway.app/schema.json",
     "build": {
-        "builder": "NIXPACKS",
-        "nixpacksPlan": {
-            "build": [
-                "pip install -r requirements.txt"
-            ],
-            "start": "python api/main.py"
-        }
+        "builder": "NIXPACKS"
     },
     "deploy": {
-        "startCommand": "python api/main.py",
+        "startCommand": "python3 api/main.py",
         "healthcheckPath": "/health",
         "restartPolicyType": "ON_FAILURE",
         "restartPolicyMaxRetries": 10
-    }
+    },
+    "environments": [
+        {
+            "name": "production",
+            "variables": {
+                "PYTHON_VERSION": "3.11"
+            }
+        }
+    ]
 }
