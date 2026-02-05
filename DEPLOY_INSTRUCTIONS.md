@@ -96,9 +96,17 @@ git push -u origin main --force
 ```
 
 ### Railway Build Fails
-Ensure `requirements.txt` is in the root directory with:
 ```
-yt-dlp>=2024.1.1
+Error: /bin/bash: line 1: python: command not found
+```
+Make sure `pyproject.toml` is in the root directory with:
+```toml
+[project]
+name = "auradownloader-api"
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp>=2024.1.1",
+]
 ```
 
 ---
@@ -131,6 +139,7 @@ vercel logs --prod
 |------|---------|
 | `vercel.json` | Vercel configuration |
 | `railway.json` | Railway configuration |
+| `pyproject.toml` | Python project configuration (for Railway) |
 | `requirements.txt` | Python dependencies (yt-dlp) |
 | `api/main.py` | Python backend API |
 | `guide.md` | Full deployment guide |

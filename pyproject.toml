@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auradownloader-api"
+version = "1.0.0"
+description = "AuraDownloader Python Backend with yt-dlp"
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp>=2024.1.1",
+]
+
+[project.scripts]
+auradownloader = "api.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["api*"]
