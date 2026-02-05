@@ -1,0 +1,5 @@
+{
+  "name": "AuraDownloader",
+  "description": "A modern, video-focused web application that allows users to fetch and download media from multiple popular platforms using a single unified interface.",
+  "requestFramePermissions": []
+}
