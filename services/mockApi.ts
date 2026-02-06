@@ -1,6 +1,8 @@
 import { MediaResult, MediaType, DownloadOption, PlaylistResult, PlaylistItem } from '../types';
 
-const PROXY_ENDPOINT = '/api/fetch';
+// Use environment variable for Railway backend URL, fallback to relative path for local dev
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+const PROXY_ENDPOINT = `${API_BASE_URL}/api/fetch`;
 const DIRECT_API_URL = 'https://cobalt-production-4e75.up.railway.app/api/json';
 const CORS_PROXY = 'https://corsproxy.io/?';
 
