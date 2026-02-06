@@ -509,6 +509,14 @@ export async function handleDownload(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: 'URL is required' });
   }
 
+  const urlStr = String(url);
+
+  // Check if it's already a direct video URL (googlevideo.com) - redirect directly
+  if (urlStr.includes('googlevideo.com') || urlStr.includes('redirect')) {
+    console.log('Direct URL detected, redirecting:', urlStr.substring(0, 100) + '...');
+    return res.redirect(302, urlStr);
+  }
+
   try {
     // Get direct URL from yt-dlp using subprocess (--get-url returns plain text)
     const args = ['-m', 'yt_dlp', '--get-url'];
@@ -517,7 +525,7 @@ export async function handleDownload(req: VercelRequest, res: VercelResponse) {
       args.push('--format', String(formatId));
     }
 
-    args.push(String(url));
+    args.push(urlStr);
 
     return new Promise((resolve) => {
       const child = spawn('python', args);

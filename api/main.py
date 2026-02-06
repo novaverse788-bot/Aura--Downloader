@@ -255,6 +255,15 @@ class APIHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({'error': 'URL required'}).encode())
                     return
                 
+                # Check if it's a direct URL (googlevideo.com) - if so, redirect directly
+                if 'googlevideo.com' in url or 'redirect' in url.lower():
+                    print(f"Direct URL detected, redirecting: {url[:100]}...")
+                    self.send_response(302)
+                    self.send_header('Location', url)
+                    self.send_cors_headers()
+                    self.end_headers()
+                    return
+                
                 print(f"Getting download URL for: {url}")
                 
                 # Get direct URL from yt-dlp
