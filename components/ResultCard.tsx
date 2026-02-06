@@ -37,18 +37,9 @@ const ResultCard: React.FC<ResultCardProps> = ({ data, onReset }) => {
   }, [downloadingId]);
 
   const handleDownload = (optionId: string, url: string, filename: string, formatId?: string) => {
-    const isHQ = formatId && (formatId.includes('+') || formatId === 'mp3');
-    if (isHQ) {
-      const taskId = crypto.randomUUID();
-      setDownloadingId(taskId);
-      setProgress({ percent: 0, status: 'Starting...' });
-
-      const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}&formatId=${encodeURIComponent(formatId)}&taskId=${taskId}`;
-      window.location.href = downloadUrl;
-    } else {
-      const downloadUrl = `/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`;
-      window.location.href = downloadUrl;
-    }
+    // Use the original YouTube URL (data.source) for downloading, fallback to data.url
+    const downloadUrl = `/api/download?url=${encodeURIComponent(data.source || data.url)}&filename=${encodeURIComponent(filename)}&formatId=${encodeURIComponent(formatId || optionId)}`;
+    window.location.href = downloadUrl;
   };
 
   // Fallback thumbnail if image fails to load

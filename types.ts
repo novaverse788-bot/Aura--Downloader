@@ -48,6 +48,7 @@ export interface PlaylistResult {
 export interface MediaResult {
   id: string;
   url: string;
+  source?: string; // Original URL for downloads (e.g., YouTube URL)
   title: string;
   thumbnail: string;
   duration?: string;
