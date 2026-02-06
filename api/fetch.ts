@@ -1,7 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
 // Backend URL - should be set via environment variable
-const BACKEND_URL = process.env.BACKEND_URL || 'https://cobalt-production-4e75.up.railway.app';
+const BACKEND_URL = process.env.BACKEND_URL || 'https://aura-downloader-production.up.railway.app';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // 1. CORS Headers
