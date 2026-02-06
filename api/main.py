@@ -240,6 +240,77 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'ok'}).encode())
+        elif self.path.startswith('/api/json'):
+            # Handle GET /api/json?url=... (for Cobalt API compatibility)
+            try:
+                parsed = urlparse(self.path)
+                params = parse_qs(parsed.query)
+                url = params.get('url', [None])[0]
+                
+                if not url:
+                    self.send_response(400)
+                    self.send_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'status': 'error', 'text': 'URL required'}).encode())
+                    return
+                
+                print(f"Fetching metadata for: {url}")
+                
+                # Get metadata using yt-dlp
+                args = ['-j', '--no-warnings']
+                args.append(url)
+                
+                metadata = execute_yt_dlp_json(args)
+                
+                # Build response in Cobalt API format
+                thumbnail = (metadata.get('thumbnails', [])[-1]['url'] 
+                           if metadata.get('thumbnails') 
+                           else metadata.get('thumbnail'))
+                
+                # Build download options
+                options = build_download_options(metadata.get('formats', []))
+                
+                response = {
+                    'status': 'success',
+                    'url': metadata.get('url'),
+                    'title': metadata.get('title'),
+                    'author': metadata.get('uploader') or metadata.get('uploader_id') or 'Unknown',
+                    'duration': format_duration(metadata.get('duration') or metadata.get('duration_string')),
+                    'width': metadata.get('width'),
+                    'height': metadata.get('height'),
+                    'thumbnail': thumbnail,
+                    'platform': 'YouTube',
+                    'source': metadata.get('webpage_url'),
+                    'options': options,
+                    'isAudioOnly': False,
+                    'isPlaylist': False
+                }
+                
+                self.send_response(200)
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode())
+                
+            except Exception as e:
+                print(f"Error: {e}")
+                error_msg = str(e)
+                user_message = 'Unable to fetch media. Please check the URL.'
+                
+                if 'Private' in error_msg:
+                    user_message = 'This content is private.'
+                elif 'age-restricted' in error_msg.lower():
+                    user_message = 'This content is age-restricted.'
+                elif 'deleted' in error_msg.lower():
+                    user_message = 'This content has been deleted.'
+                
+                self.send_response(500)
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    'status': 'error',
+                    'text': user_message,
+                    'details': error_msg
+                }).encode())
         elif self.path.startswith('/api/download'):
             # Handle download redirect
             try:

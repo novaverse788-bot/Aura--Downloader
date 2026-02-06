@@ -1,78 +1,74 @@
-import { MediaResult, MediaType, DownloadOption, PlaylistResult, PlaylistItem } from '../types';
+import { MediaResult, MediaType, DownloadOption } from '../types';
 
-// Use environment variable for Railway backend URL, fallback to relative path for local dev
-const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-const PROXY_ENDPOINT = `${API_BASE_URL}/api/fetch`;
-
-// Multiple backend options for reliability
-const BACKEND_OPTIONS = [
-  { name: 'cobalt', url: 'https://cobalt-production-4e75.up.railway.app/api/json' },
-  { name: 'cobalt-mirror1', url: 'https://cobalt-api-z1dh.railway.app/api/json' },
-  { name: 'co.wuk.sh', url: 'https://co.wuk.sh/api/json' }
-];
-
-// CORS proxy options
-const CORS_PROXIES = [
-  'https://corsproxy.io/?',
-  'https://api.allorigins.win/raw?url=',
-  'https://corsproxy.io/?'
-];
+// Use environment variable for Vercel proxy URL (preferred) or Railway backend URL
+const VERCEL_PROXY_URL = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api/fetch` : '';
+const RAILWAY_BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://aura-downloader-production.up.railway.app';
 
 export const fetchMediaDetails = async (url: string): Promise<MediaResult> => {
   if (!url.startsWith('http')) {
     throw new Error('Please enter a valid URL starting with http:// or https://');
   }
 
-  // 1. Try Backend Proxy (Preferred) - for local development
-  if (API_BASE_URL) {
+  // 1. Try Vercel Proxy (Preferred) - for production with Railway backend
+  if (VERCEL_PROXY_URL) {
     try {
-      return await fetchFromEndpoint(PROXY_ENDPOINT, url);
+      return await fetchFromEndpoint(VERCEL_PROXY_URL, url, 'POST');
     } catch (proxyError: any) {
-      console.warn('Backend proxy failed:', proxyError);
+      console.warn('Vercel proxy failed:', proxyError);
     }
   }
 
-  // 2. Try direct backend URLs with CORS proxy fallback
-  for (const backend of BACKEND_OPTIONS) {
-    for (const proxy of CORS_PROXIES) {
-      try {
-        const targetUrl = `${backend.url}?url=${encodeURIComponent(url)}`;
-        const proxiedUrl = `${proxy}${encodeURIComponent(targetUrl)}`;
-        return await fetchFromEndpoint(proxiedUrl, url);
-      } catch (error: any) {
-        console.warn(`Backend ${backend.name} via proxy ${proxy} failed:`, error.message);
-        // Continue to next option
-      }
-    }
+  // 2. Try Railway Backend directly with POST
+  try {
+    const railwayEndpoint = `${RAILWAY_BACKEND_URL}/api/fetch`;
+    return await fetchFromEndpoint(railwayEndpoint, url, 'POST');
+  } catch (backendError: any) {
+    console.warn('Railway backend failed:', backendError);
   }
 
-  throw new Error('Unable to fetch media. All backend services are currently unavailable. Please try again later.');
+  // 3. Try Railway Backend with GET /api/json
+  try {
+    const jsonEndpoint = `${RAILWAY_BACKEND_URL}/api/json?url=${encodeURIComponent(url)}`;
+    return await fetchFromEndpoint(jsonEndpoint, url, 'GET');
+  } catch (jsonError: any) {
+    console.warn('Railway /api/json failed:', jsonError);
+  }
+
+  throw new Error('Unable to fetch media. Please check the URL and try again.');
 };
 
-async function fetchFromEndpoint(endpoint: string, mediaUrl: string): Promise<MediaResult> {
+async function fetchFromEndpoint(endpoint: string, mediaUrl: string, method: 'GET' | 'POST'): Promise<MediaResult> {
   const controller = new AbortController();
-  // 30s timeout for yt-dlp
   const timeoutId = setTimeout(() => controller.abort(), 30000);
 
   try {
-    const response = await fetch(endpoint, {
-      method: 'GET',
+    const options: RequestInit = {
+      method,
       headers: {
         'Accept': 'application/json',
         'Content-Type': 'application/json'
       },
       signal: controller.signal
-    });
+    };
+
+    if (method === 'POST') {
+      options.body = JSON.stringify({
+        url: mediaUrl,
+        isAudioOnly: false
+      });
+    }
+
+    const response = await fetch(endpoint, options);
 
     if (!response.ok) {
       if (response.status === 404) {
-        throw new Error('Media service endpoint not found (404). Please try again.');
+        throw new Error('Media service endpoint not found (404).');
       }
       if (response.status === 403) {
-        throw new Error('Access denied (403). The service may be rate-limited.');
+        throw new Error('Access denied (403). Rate limit may be exceeded.');
       }
       if (response.status === 500) {
-        throw new Error('Server error (500). The backend service may be overloaded.');
+        throw new Error('Server error (500). Please try again later.');
       }
       let errorText = `Request failed (${response.status})`;
       try {
@@ -86,8 +82,6 @@ async function fetchFromEndpoint(endpoint: string, mediaUrl: string): Promise<Me
     const data = await response.json();
 
     if (data.status === 'success' || data.status === 'stream') {
-      // Handle different API response formats
-
       // Check if it's a playlist
       if (data.isPlaylist && data.playlistData) {
         return {
@@ -122,23 +116,22 @@ async function fetchFromEndpoint(endpoint: string, mediaUrl: string): Promise<Me
         };
       }
 
-      // Handle single video - map different API response formats
+      // Handle single video
       let options: DownloadOption[] = [];
 
-      // Format 1: options array from cobalt API
       if (data.options && Array.isArray(data.options)) {
-        options = data.options.map((opt: any) => ({
-          id: opt.id || crypto.randomUUID(),
+        options = data.options.map((opt: any, index: number) => ({
+          id: opt.id || `option_${index}`,
           label: opt.label || opt.name || 'Download',
           format: opt.format || opt.ext || 'MP4',
           size: opt.size || 'Unknown',
-          url: opt.url || data.url || mediaUrl,
+          url: opt.url || data.url,
           formatId: opt.formatId || opt.id,
-          isPrimary: opt.isPrimary || false
+          isPrimary: opt.isPrimary || index === 0
         }));
       }
 
-      // Format 2: Create options from stream data
+      // Fallback options
       if (options.length === 0 && data.url) {
         options.push({
           id: 'video',
@@ -149,21 +142,9 @@ async function fetchFromEndpoint(endpoint: string, mediaUrl: string): Promise<Me
           formatId: 'best',
           isPrimary: true
         });
-
-        if (data.audio) {
-          options.push({
-            id: 'audio',
-            label: 'Audio (M4A)',
-            format: 'M4A',
-            size: 'Unknown',
-            url: data.audio,
-            formatId: 'bestaudio',
-            isPrimary: false
-          });
-        }
       }
 
-      // Format 3: Create MP3 option if audio is available
+      // Add MP3 option if audio
       if (data.status === 'audio' || data.picker) {
         options.push({
           id: 'audio_mp3',
@@ -176,27 +157,12 @@ async function fetchFromEndpoint(endpoint: string, mediaUrl: string): Promise<Me
         });
       }
 
-      // Fallback - always add at least one option
-      if (options.length === 0) {
-        options.push({
-          id: 'video',
-          label: 'Video (MP4)',
-          format: 'MP4',
-          size: 'Unknown',
-          url: data.url || mediaUrl,
-          formatId: 'best',
-          isPrimary: true
-        });
-      }
-
-      // Format duration if available
       const formattedDuration = data.duration
         ? (typeof data.duration === 'string'
           ? data.duration
           : `${Math.floor((data.duration || 0) / 60)}:${((data.duration || 0) % 60).toString().padStart(2, '0')}`)
         : 'Unknown';
 
-      // Get thumbnail - use data.thumbnail or fallback
       const thumbnail = data.thumbnail ||
         data.thumbnails?.[0] ||
         'https://images.unsplash.com/photo-1611162617474-5b21e879e113?q=80&w=1000&auto=format&fit=crop';
@@ -210,22 +176,22 @@ async function fetchFromEndpoint(endpoint: string, mediaUrl: string): Promise<Me
         width: data.width,
         height: data.height,
         thumbnail: thumbnail,
-        platform: data.platform || 'generic',
+        platform: data.platform || 'YouTube',
         type: data.status === 'audio' ? MediaType.AUDIO : MediaType.VIDEO,
         options: options,
         isPlaylist: false
       };
     }
 
-    if (data.status === 'error' || data.error) {
-      throw new Error(data.text || data.error || 'Unknown error occurred');
+    if (data.status === 'error') {
+      throw new Error(data.text || data.error || 'Unknown error');
     }
 
-    throw new Error('No downloadable media found in the response.');
+    throw new Error('No downloadable media found.');
 
   } catch (error: any) {
     if (error.name === 'AbortError') {
-      throw new Error('Connection timed out. The service took too long to respond.');
+      throw new Error('Connection timed out. Please try again.');
     }
     throw error;
   } finally {
