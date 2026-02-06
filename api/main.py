@@ -156,9 +156,11 @@ def build_download_options(formats):
         
         # Add best audio option
         if best_audio.get('url'):
+            abr = best_audio.get('abr', 0)
+            abr_str = f"{int(abr)}kbps" if abr else 'Best'
             options.append({
                 'id': 'audio_best',
-                'label': f"Audio {best_audio.get('ext', 'm4a').upper()} ({best_audio.get('abr', 0) and f'{int(best_audio.get(\"abr\", 0))}kbps' or 'Best'})",
+                'label': f"Audio {best_audio.get('ext', 'm4a').upper()} ({abr_str})",
                 'format': best_audio.get('ext', 'm4a').upper(),
                 'size': format_bytes(best_audio.get('filesize')),
                 'url': best_audio.get('url', ''),
