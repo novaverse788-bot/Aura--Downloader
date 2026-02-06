@@ -7,6 +7,9 @@ Deploy this separately on Railway/Render for free yt-dlp support
 import json
 import subprocess
 import os
+import re
+import ssl
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse, urlencode
 
@@ -17,6 +20,77 @@ CORS_HEADERS = {
     'Access-Control-Allow-Headers': 'Content-Type',
     'Content-Type': 'application/json'
 }
+
+# Invidious instances for fallback (public YouTube proxies)
+INVIDIOUS_INSTANCES = [
+    'https://yewtu.be',
+    'https://invidious.snopyta.org',
+    'https://invidious.kavin.rocks',
+]
+
+
+def get_video_id_from_url(url):
+    """Extract YouTube video ID from URL"""
+    patterns = [
+        r'(?:v=|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})',
+        r'watch\?v=([a-zA-Z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
+def fetch_from_invidious(video_id):
+    """Fetch video info from Invidious as fallback"""
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            url = f'{instance}/api/v1/videos/{video_id}'
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ssl_context, timeout=10) as response:
+                data = json.loads(response.read().decode())
+                
+                formats = data.get('formatStreams', [])
+                options = []
+                
+                for fmt in formats:
+                    height = fmt.get('height', 0)
+                    options.append({
+                        'id': fmt.get('format_id', 'unknown'),
+                        'label': f"{height}p {fmt.get('ext', 'mp4').upper()}",
+                        'format': fmt.get('ext', 'mp4').upper(),
+                        'size': 'Unknown',
+                        'url': fmt.get('url', ''),
+                        'formatId': fmt.get('format_id', 'unknown'),
+                        'isPrimary': height in [720, 1080]
+                    })
+                
+                return {
+                    'status': 'success',
+                    'url': formats[0].get('url') if formats else '',
+                    'title': data.get('title', 'Unknown'),
+                    'author': data.get('author', 'Unknown'),
+                    'duration': format_duration(data.get('lengthSeconds')),
+                    'width': data.get('width'),
+                    'height': data.get('height'),
+                    'thumbnail': data.get('thumbnailUrl', ''),
+                    'platform': 'YouTube',
+                    'source': f'https://www.youtube.com/watch?v={video_id}',
+                    'options': options,
+                    'isAudioOnly': False,
+                    'isPlaylist': False,
+                    'fromInvidious': True
+                }
+        except Exception as e:
+            print(f"Invidious instance {instance} failed: {e}")
+            continue
+    
+    return None
 
 
 def format_bytes(size):
@@ -56,7 +130,23 @@ def execute_yt_dlp_json(args):
         )
         
         if result.returncode != 0:
-            raise Exception(result.stderr.strip())
+            error_msg = result.stderr.strip()
+            
+            # Check for specific error types and provide helpful messages
+            if 'Sign in to confirm' in error_msg or 'bot' in error_msg.lower():
+                raise Exception('YouTube is blocking requests from this server due to bot detection. This is a free server limitation. Try using a different video or wait a few minutes.')
+            elif 'Private' in error_msg:
+                raise Exception('This video is private. Only the uploader can access it.')
+            elif 'age-restricted' in error_msg.lower() or 'age limit' in error_msg.lower():
+                raise Exception('This video is age-restricted and cannot be accessed without YouTube verification.')
+            elif 'deleted' in error_msg.lower():
+                raise Exception('This video has been deleted.')
+            elif 'unavailable' in error_msg.lower():
+                raise Exception('This video is unavailable.')
+            elif 'Sign in' in error_msg or 'cookies' in error_msg.lower():
+                raise Exception('YouTube requires authentication. This free service cannot bypass YouTube verification.')
+            else:
+                raise Exception(error_msg)
         
         # Handle multiple JSON objects (playlists)
         lines = result.stdout.strip().split('\n')
@@ -296,7 +386,22 @@ class APIHandler(BaseHTTPRequestHandler):
                 error_msg = str(e)
                 user_message = 'Unable to fetch media. Please check the URL.'
                 
-                if 'Private' in error_msg:
+                # Check if it's a bot detection error
+                if 'bot' in error_msg.lower() or 'sign in' in error_msg.lower() or 'cookies' in error_msg.lower():
+                    # Try Invidious fallback for YouTube
+                    if 'youtube.com' in url or 'youtu.be' in url:
+                        video_id = get_video_id_from_url(url)
+                        if video_id:
+                            print(f"yt-dlp blocked, trying Invidious fallback for {video_id}")
+                            invidious_result = fetch_from_invidious(video_id)
+                            if invidious_result:
+                                self.send_response(200)
+                                self.send_cors_headers()
+                                self.end_headers()
+                                self.wfile.write(json.dumps(invidious_result).encode())
+                                return
+                    user_message = 'YouTube is blocking requests from this server. Trying alternative methods...'
+                elif 'Private' in error_msg:
                     user_message = 'This content is private.'
                 elif 'age-restricted' in error_msg.lower():
                     user_message = 'This content is age-restricted.'
@@ -420,7 +525,22 @@ class APIHandler(BaseHTTPRequestHandler):
                 error_msg = str(e)
                 user_message = 'Unable to fetch media. Please check the URL.'
                 
-                if 'Private' in error_msg:
+                # Check if it's a bot detection error
+                if 'bot' in error_msg.lower() or 'sign in' in error_msg.lower() or 'cookies' in error_msg.lower():
+                    # Try Invidious fallback for YouTube
+                    if 'youtube.com' in url or 'youtu.be' in url:
+                        video_id = get_video_id_from_url(url)
+                        if video_id:
+                            print(f"yt-dlp blocked, trying Invidious fallback for {video_id}")
+                            invidious_result = fetch_from_invidious(video_id)
+                            if invidious_result:
+                                self.send_response(200)
+                                self.send_cors_headers()
+                                self.end_headers()
+                                self.wfile.write(json.dumps(invidious_result).encode())
+                                return
+                    user_message = 'YouTube is blocking requests from this server. Trying alternative methods...'
+                elif 'Private' in error_msg:
                     user_message = 'This content is private.'
                 elif 'age-restricted' in error_msg.lower():
                     user_message = 'This content is age-restricted.'
