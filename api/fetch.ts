@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { spawn } from 'child_process';
+import crypto from 'crypto';
 
 // YouTube Downloader API
 // - Uses yt-dlp for YouTube video metadata and downloads
@@ -131,7 +132,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).end();
   }
 
-  // 3. Method validation
+  // 3. Handle download redirect (GET request to /api/download)
+  if (req.method === 'GET' && (req.url?.includes('/api/download') || (req.query as any)?.url)) {
+    return handleDownload(req, res);
+  }
+
+  // 4. Method validation for POST
   if (req.method !== 'POST') {
     return res.status(405).json({
       status: 'error',
@@ -197,9 +203,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 async function handleSingleVideo(url: string, isAudioOnly: boolean, res: VercelResponse) {
   const args = ['-m', 'yt_dlp', '-j', '--no-warnings'];
 
-  if (isAudioOnly) {
-    args.push('-x', '--audio-format', 'mp3');
-  }
+  // Don't use -x for metadata, only for actual download
+  // -x will limit formats to audio only
 
   args.push(url);
 
@@ -384,7 +389,7 @@ function buildDownloadOptions(formats: YTDLPSourceFormat[]) {
     isPrimary?: boolean;
   }> = [];
 
-  // Case 1: Combined formats
+  // Case 1: Combined formats (video + audio)
   if (videoWithAudio.length > 0) {
     const videoQualities = [...new Map(videoWithAudio.map(f => [f.height, f])).values()]
       .filter(f => f.height)
@@ -405,8 +410,8 @@ function buildDownloadOptions(formats: YTDLPSourceFormat[]) {
     });
   }
 
-  // Case 2: DASH format (separate video/audio)
-  if (videoWithAudio.length === 0 && videoOnly.length > 0 && audioOnly.length > 0) {
+  // Case 2: DASH format (separate video/audio) - also run if videoWithAudio exists to add more options
+  if (videoOnly.length > 0 && audioOnly.length > 0) {
     const videoQualities = [...new Map(videoOnly.map(f => [f.height, f])).values()]
       .filter(f => f.height)
       .sort((a, b) => (b.height || 0) - (a.height || 0))
@@ -415,7 +420,10 @@ function buildDownloadOptions(formats: YTDLPSourceFormat[]) {
     const bestAudio = audioOnly.sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
 
     videoQualities.forEach((format, i) => {
-      if (!format.url) return;
+      // Only add if not already exists
+      const exists = options.some(o => o.id === `video_${format.height}p`);
+      if (!format.url || exists) return;
+
       const totalSize = (format.filesize || 0) + (bestAudio.filesize || 0);
       options.push({
         id: `video_${format.height}p`,
@@ -424,12 +432,25 @@ function buildDownloadOptions(formats: YTDLPSourceFormat[]) {
         size: totalSize > 0 ? formatBytes(totalSize) : 'Unknown',
         url: format.url,
         formatId: `${format.format_id}+${bestAudio.format_id}`,
-        isPrimary: i === 0
+        isPrimary: i === 0 && options.length === 0
       });
     });
+
+    // Add best audio option
+    if (bestAudio.url) {
+      options.push({
+        id: 'audio_best',
+        label: `Audio ${bestAudio.ext?.toUpperCase() || 'M4A'} (${bestAudio.abr ? Math.round(bestAudio.abr) + 'kbps' : 'Best'})`,
+        format: (bestAudio.ext?.toUpperCase() || 'M4A'),
+        size: bestAudio.filesize ? formatBytes(bestAudio.filesize) : 'Unknown',
+        url: bestAudio.url,
+        formatId: bestAudio.format_id,
+        isPrimary: false
+      });
+    }
   }
 
-  // Case 3: Video only
+  // Case 3: Video only (no audio available)
   if (options.length === 0 && videoOnly.length > 0) {
     const videoQualities = [...new Map(videoOnly.map(f => [f.height, f])).values()]
       .filter(f => f.height)
@@ -450,7 +471,7 @@ function buildDownloadOptions(formats: YTDLPSourceFormat[]) {
     });
   }
 
-  // Fallback
+  // Fallback - always add audio option if available
   if (options.length === 0) {
     const fallbackUrl = formats[formats.length - 1]?.url || '';
     options.push({
@@ -462,16 +483,78 @@ function buildDownloadOptions(formats: YTDLPSourceFormat[]) {
       formatId: 'mp4',
       isPrimary: true
     });
+  }
+
+  // Always add MP3 audio option if audio formats exist
+  if (audioOnly.length > 0 || videoWithAudio.length > 0) {
     options.push({
-      id: 'audio',
+      id: 'audio_mp3',
       label: 'Audio Only (MP3)',
       format: 'MP3',
       size: 'Unknown',
-      url: fallbackUrl,
+      url: '',
       formatId: 'mp3',
       isPrimary: false
     });
   }
 
   return options;
+}
+
+// Handle download redirect to direct URL
+export async function handleDownload(req: VercelRequest, res: VercelResponse) {
+  const { url, formatId, filename } = req.query || {};
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  try {
+    // Get direct URL from yt-dlp using subprocess (--get-url returns plain text)
+    const args = ['-m', 'yt_dlp', '--get-url'];
+
+    if (formatId && formatId !== 'best') {
+      args.push('--format', String(formatId));
+    }
+
+    args.push(String(url));
+
+    return new Promise((resolve) => {
+      const child = spawn('python', args);
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (data) => {
+        stdout += data;
+      });
+
+      child.stderr.on('data', (data) => {
+        stderr += data;
+      });
+
+      child.on('close', (code) => {
+        if (code === 0 && stdout.trim()) {
+          // Redirect to the direct URL
+          res.redirect(stdout.trim());
+          resolve(undefined);
+        } else {
+          console.error('Download error:', stderr);
+          res.status(500).json({ error: 'Could not get download URL', details: stderr });
+          resolve(undefined);
+        }
+      });
+
+      // Timeout after 30 seconds
+      setTimeout(() => {
+        child.kill();
+        res.status(500).json({ error: 'Download timed out' });
+        resolve(undefined);
+      }, 30000);
+    });
+
+  } catch (error: any) {
+    console.error('Download error:', error);
+    return res.status(500).json({ error: 'Download failed', details: error.message });
+  }
 }

@@ -8,7 +8,7 @@ import json
 import subprocess
 import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlencode
 
 # CORS headers
 CORS_HEADERS = {
@@ -45,7 +45,7 @@ def format_duration(seconds):
     return f"{minutes}:{secs:02d}"
 
 
-def execute_yt_dlp(args):
+def execute_yt_dlp_json(args):
     """Execute yt-dlp and return JSON output"""
     try:
         result = subprocess.run(
@@ -81,6 +81,27 @@ def execute_yt_dlp(args):
         raise Exception(str(e))
 
 
+def execute_yt_dlp_get_url(args):
+    """Execute yt-dlp --get-url and return the URL"""
+    try:
+        result = subprocess.run(
+            ['python', '-m', 'yt_dlp'] + args,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        else:
+            raise Exception(result.stderr.strip())
+    
+    except subprocess.TimeoutExpired:
+        raise Exception('yt-dlp timed out (60s)')
+    except Exception as e:
+        raise Exception(str(e))
+
+
 def build_download_options(formats):
     """Build download options from yt-dlp formats"""
     options = []
@@ -90,7 +111,7 @@ def build_download_options(formats):
     video_only = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
     audio_only = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
     
-    # Get unique video qualities
+    # Case 1: Combined formats (video + audio)
     if video_with_audio:
         qualities = {}
         for f in video_with_audio:
@@ -104,13 +125,13 @@ def build_download_options(formats):
                 'label': f"{height}p {f.get('ext', 'mp4').upper()}",
                 'format': f.get('ext', 'mp4').upper(),
                 'size': format_bytes(f.get('filesize')),
-                'url': '',  # Will be set by frontend
+                'url': f.get('url', ''),
                 'formatId': f.get('format_id'),
                 'isPrimary': height in [720, 1080]
             })
     
-    # DASH formats (separate video/audio)
-    elif video_only and audio_only:
+    # Case 2: DASH formats (separate video/audio) - also add if video_with_audio exists
+    if video_only and audio_only:
         best_audio = max(audio_only, key=lambda x: x.get('abr', 0))
         qualities = {}
         for f in video_only:
@@ -118,6 +139,9 @@ def build_download_options(formats):
                 if f['height'] not in qualities:
                     qualities[f['height']] = f
         for height in sorted(qualities.keys(), reverse=True)[:4]:
+            # Skip if already exists
+            if any(o['id'] == f"video_{height}p" for o in options):
+                continue
             f = qualities[height]
             total_size = (f.get('filesize', 0) or 0) + (best_audio.get('filesize', 0) or 0)
             options.append({
@@ -125,30 +149,65 @@ def build_download_options(formats):
                 'label': f"{height}p {f.get('ext', 'mp4').upper()}",
                 'format': f.get('ext', 'mp4').upper(),
                 'size': format_bytes(total_size),
-                'url': '',
+                'url': f.get('url', ''),
                 'formatId': f"{f.get('format_id')}+{best_audio.get('format_id')}",
+                'isPrimary': height in [720, 1080] and len(options) == 0
+            })
+        
+        # Add best audio option
+        if best_audio.get('url'):
+            options.append({
+                'id': 'audio_best',
+                'label': f"Audio {best_audio.get('ext', 'm4a').upper()} ({best_audio.get('abr', 0) and f'{int(best_audio.get(\"abr\", 0))}kbps' or 'Best'})",
+                'format': best_audio.get('ext', 'm4a').upper(),
+                'size': format_bytes(best_audio.get('filesize')),
+                'url': best_audio.get('url', ''),
+                'formatId': best_audio.get('format_id'),
+                'isPrimary': False
+            })
+    
+    # Case 3: Video only (no audio available)
+    if not options and video_only:
+        qualities = {}
+        for f in video_only:
+            if f.get('height'):
+                if f['height'] not in qualities:
+                    qualities[f['height']] = f
+        for height in sorted(qualities.keys(), reverse=True)[:4]:
+            f = qualities[height]
+            options.append({
+                'id': f"video_{height}p",
+                'label': f"{height}p {f.get('ext', 'mp4').upper()}",
+                'format': f.get('ext', 'mp4').upper(),
+                'size': format_bytes(f.get('filesize')),
+                'url': f.get('url', ''),
+                'formatId': f.get('format_id'),
                 'isPrimary': height in [720, 1080]
             })
     
-    # Fallback
-    if not options:
+    # Fallback - always add audio option if audio formats exist
+    if audio_only or video_with_audio:
         options.append({
-            'id': 'video',
-            'label': 'Video (MP4)',
-            'format': 'MP4',
-            'size': 'Unknown',
-            'url': '',
-            'formatId': 'mp4',
-            'isPrimary': True
-        })
-        options.append({
-            'id': 'audio',
-            'label': 'Audio (MP3)',
+            'id': 'audio_mp3',
+            'label': 'Audio Only (MP3)',
             'format': 'MP3',
             'size': 'Unknown',
             'url': '',
             'formatId': 'mp3',
             'isPrimary': False
+        })
+    
+    # Final fallback
+    if not options:
+        fallback_url = formats[-1].get('url', '') if formats else ''
+        options.append({
+            'id': 'video',
+            'label': 'Video (MP4)',
+            'format': 'MP4',
+            'size': 'Unknown',
+            'url': fallback_url,
+            'formatId': 'mp4',
+            'isPrimary': True
         })
     
     return options
@@ -179,6 +238,43 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_cors_headers()
             self.end_headers()
             self.wfile.write(json.dumps({'status': 'ok'}).encode())
+        elif self.path.startswith('/api/download'):
+            # Handle download redirect
+            try:
+                parsed = urlparse(self.path)
+                params = parse_qs(parsed.query)
+                url = params.get('url', [None])[0]
+                format_id = params.get('formatId', ['best'])[0]
+                
+                if not url:
+                    self.send_response(400)
+                    self.send_cors_headers()
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'URL required'}).encode())
+                    return
+                
+                print(f"Getting download URL for: {url}")
+                
+                # Get direct URL from yt-dlp
+                args = ['--get-url']
+                if format_id and format_id != 'best':
+                    args.extend(['--format', format_id])
+                args.append(url)
+                
+                direct_url = execute_yt_dlp_get_url(args)
+                
+                # Redirect to the direct URL
+                self.send_response(302)
+                self.send_header('Location', direct_url)
+                self.send_cors_headers()
+                self.end_headers()
+                
+            except Exception as e:
+                print(f"Download error: {e}")
+                self.send_response(500)
+                self.send_cors_headers()
+                self.end_headers()
+                self.wfile.write(json.dumps({'error': 'Download failed', 'details': str(e)}).encode())
         else:
             self.send_response(404)
             self.send_cors_headers()
@@ -204,12 +300,12 @@ class APIHandler(BaseHTTPRequestHandler):
                 
                 print(f"Fetching metadata for: {url}")
                 
-                # Get metadata
-                args = ['-j', '--no-warnings', '--flat-playlist', url]
-                if is_audio_only:
-                    args = ['-x', '--audio-format', 'mp3'] + args
+                # Get metadata - don't use -x for metadata, only for download
+                args = ['-j', '--no-warnings']
+                # Don't use --flat-playlist for single videos
+                args.append(url)
                 
-                metadata = execute_yt_dlp(args)
+                metadata = execute_yt_dlp_json(args)
                 
                 # Build response
                 thumbnail = (metadata.get('thumbnails', [])[-1]['url'] 
@@ -270,6 +366,7 @@ def main():
     server = HTTPServer(('0.0.0.0', port), APIHandler)
     print(f"Starting AuraDownloader API on port {port}")
     print(f"Health check: http://localhost:{port}/health")
+    print(f"Download endpoint: http://localhost:{port}/api/download?url=<video_url>&formatId=<format_id>")
     server.serve_forever()
 
 
